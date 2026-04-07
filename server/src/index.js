@@ -126,10 +126,11 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
   let ttsSentenceBuffer = [];
   let ttsSentenceChars = 0;
   let ttsChunkIndex = 0;
-  const TTS_MIN_SENTENCES = 2;
-  const TTS_MAX_SENTENCES = 4;
-  const TTS_SOFT_MAX_CHARS = 140;
-  const TTS_HARD_MAX_CHARS = 260;
+  // 优化：降低延迟，1 个句子就发送 TTS
+  const TTS_MIN_SENTENCES = 1;  // 从 2 改成 1，立即发送
+  const TTS_MAX_SENTENCES = 2;  // 从 4 改成 2，减少等待
+  const TTS_SOFT_MAX_CHARS = 80;  // 从 140 改成 80，更早触发
+  const TTS_HARD_MAX_CHARS = 150; // 从 260 改成 150，防止太长
 
   const getPauseMs = (rawText) => {
     const text = (rawText || '').trim();
