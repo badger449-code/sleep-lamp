@@ -6,7 +6,7 @@ import { NoiseControl } from './components/common/NoiseControl';
 import { SleepTimer } from './components/common/SleepTimer';
 import StarryBackground from './components/common/StarryBackground';
 import { getDefaultPrompt } from './config/prompts';
-import { Mic, AlertCircle, Ear } from 'lucide-react';
+import { Mic, AlertCircle, Ear, Wifi, WifiOff } from 'lucide-react';
 import { motion } from 'framer-motion';
 import './styles/App.css';
 
@@ -31,7 +31,8 @@ function App() {
     startListening,
     stopListening,
     interruptPlayback,
-    notifyInputStarted
+    notifyInputStarted,
+    wsStatus
   } = useStoryMachine(noiseControlRef);
   
   const [textInput, setTextInput] = useState('');
@@ -279,7 +280,34 @@ function App() {
       
       {/* Header */}
       <header className="mb-8 text-center relative z-50 w-full flex flex-col items-center">
-        <h1 className="text-2xl sm:text-4xl font-extralight tracking-[0.16em] sm:tracking-[0.2em] mb-2 sm:mb-3 text-slate-200 drop-shadow-[0_0_10px_rgba(255,255,255,0.3)] mt-6 sm:mt-8">SLEEP STORY AI</h1>
+        <div className="flex items-center gap-3 mb-2">
+          <h1 className="text-2xl sm:text-4xl font-extralight tracking-[0.16em] sm:tracking-[0.2em] text-slate-200 drop-shadow-[0_0_10px_rgba(255,255,255,0.3)] mt-6 sm:mt-8">SLEEP STORY AI</h1>
+          {/* WebSocket 连接状态指示器 */}
+          <div className={`mt-6 flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-all ${
+            wsStatus === 'connected' 
+              ? 'bg-green-900/30 text-green-400 ring-1 ring-green-500/30' 
+              : wsStatus === 'connecting'
+              ? 'bg-yellow-900/30 text-yellow-400 ring-1 ring-yellow-500/30 animate-pulse'
+              : wsStatus === 'error'
+              ? 'bg-red-900/30 text-red-400 ring-1 ring-red-500/30'
+              : 'bg-slate-800/50 text-slate-500 ring-1 ring-slate-700/50'
+          }`}>
+            {wsStatus === 'connected' ? (
+              <Wifi size={12} />
+            ) : wsStatus === 'connecting' ? (
+              <Wifi size={12} className="animate-pulse" />
+            ) : wsStatus === 'error' ? (
+              <WifiOff size={12} />
+            ) : (
+              <WifiOff size={12} />
+            )}
+            <span className="hidden sm:inline">
+              {wsStatus === 'connected' ? '已连接' : 
+               wsStatus === 'connecting' ? '重连中...' : 
+               wsStatus === 'error' ? '连接失败' : '未连接'}
+            </span>
+          </div>
+        </div>
         <p className="text-xs sm:text-sm text-slate-400 font-light tracking-wide">Whisper your dreams...</p>
       </header>
 

@@ -39,6 +39,12 @@ export const useStoryMachine = (noiseControlRef) => {
   const continuousModeRef = useRef(false);
 
   const wsRef = useRef(null);
+  const wsRetryCountRef = useRef(0); // 重连次数
+  const wsMaxRetriesRef = useRef(10); // 最大重试次数
+  const wsBaseDelayRef = useRef(1000); // 基础延迟 1 秒
+  const wsMaxDelayRef = useRef(30000); // 最大延迟 30 秒
+  const [wsStatus, setWsStatus] = useState('disconnected'); // disconnected, connecting, connected, error
+  
   // Replaced SpeechRecognition with MediaRecorder
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -83,8 +89,10 @@ export const useStoryMachine = (noiseControlRef) => {
           ws.close();
           return;
         }
-        console.log('Connected to Story Server');
+        console.log('✅ Connected to Story Server');
         setError(null);
+        setWsStatus('connected');
+        wsRetryCountRef.current = 0; // 重置重试计数
       };
       
       ws.onmessage = async (event) => {
@@ -155,7 +163,8 @@ export const useStoryMachine = (noiseControlRef) => {
       };
       
       ws.onerror = (e) => {
-        console.error('WebSocket error:', e);
+        console.error('🚨 WebSocket error:', e);
+        setWsStatus('error');
         // 如果是处于连接中状态就报错，可能是端口或地址问题
         if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.CLOSED) {
            console.log('WebSocket failed to connect or closed unexpectedly');
@@ -164,14 +173,39 @@ export const useStoryMachine = (noiseControlRef) => {
       
       ws.onclose = (e) => {
         if (!isMounted) return;
-        console.log('Disconnected', e.code, e.reason);
-        // Try to reconnect after 3 seconds
+        
+        const retryCount = wsRetryCountRef.current;
+        const maxRetries = wsMaxRetriesRef.current;
+        
+        console.log(`❌ Disconnected (code: ${e.code}, reason: ${e.reason || 'none'})`);
+        console.log(`重试次数：${retryCount}/${maxRetries}`);
+        
+        setWsStatus('disconnected');
+        
+        // 达到最大重试次数，不再重连
+        if (retryCount >= maxRetries) {
+          console.error('⚠️ 达到最大重试次数，停止重连');
+          setWsStatus('error');
+          setError('网络连接失败，请刷新页面重试');
+          return;
+        }
+        
+        // 指数退避计算
+        const baseDelay = wsBaseDelayRef.current;
+        const exponentialDelay = baseDelay * Math.pow(2, retryCount); // 1s, 2s, 4s, 8s...
+        const delayWithJitter = exponentialDelay * (0.5 + Math.random()); // 加随机抖动
+        const finalDelay = Math.min(delayWithJitter, wsMaxDelayRef.current); // 不超过 30 秒
+        
+        console.log(`⏳ ${finalDelay.toFixed(0)}ms 后重试...`);
+        
         setTimeout(() => {
           if (isMounted) {
-            console.log('Attempting reconnect...');
+            wsRetryCountRef.current += 1;
+            setWsStatus('connecting');
+            console.log(`🔄 第 ${wsRetryCountRef.current} 次重连...`);
             connectWs();
           }
-        }, 3000);
+        }, finalDelay);
       };
       
       wsRef.current = ws;
