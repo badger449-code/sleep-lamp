@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "chinese-novelist": {
+      "source": "penglonghuang/chinese-novelist-skill",
+      "sourceType": "github",
+      "computedHash": "26a77867774d20ad08c3fce5d22da7313e99d2e41e734b9e49005a08808a2fa4"
+    },
+    "repo-story-time": {
+      "source": "github/awesome-copilot",
+      "sourceType": "github",
+      "computedHash": "8f85047285d0e911bafb2ced184c0034784598f1035df96247a1b5bcd570abbf"
+    }
+  }
+}
