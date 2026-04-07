@@ -3,6 +3,7 @@ import { useStoryMachine } from './hooks/useStoryMachine';
 import { useWakeWord } from './hooks/useWakeWord';
 import { VoiceSelector } from './components/common/VoiceSelector';
 import { NoiseControl } from './components/common/NoiseControl';
+import { SleepTimer } from './components/common/SleepTimer';
 import StarryBackground from './components/common/StarryBackground';
 import { getDefaultPrompt } from './config/prompts';
 import { Mic, AlertCircle, Ear } from 'lucide-react';
@@ -37,6 +38,7 @@ function App() {
   const [panelDims, setPanelDims] = useState({ width: null, height: null });
   const [mainPaddingBottom, setMainPaddingBottom] = useState(128);
   const [wakeWordEnabled, setWakeWordEnabled] = useState(false);
+  const [timerActive, setTimerActive] = useState(false);
 
   // Handle manual input detection (keyboard/touch) to activate the session
   useEffect(() => {
@@ -97,6 +99,15 @@ function App() {
       return;
     }
   }, []);
+
+  // 定时器到期：停止播放并显示提示
+  const handleTimerStop = useCallback(() => {
+    setTimerActive(false);
+    cancelTTS();
+    interruptPlayback();
+    // 温柔提示用户
+    alert('定时时间已到，祝你晚安好梦 🌙');
+  }, [cancelTTS, interruptPlayback]);
 
   const handleWakeWord = useCallback(() => {
     console.log('Wake word triggered!');
@@ -377,6 +388,9 @@ function App() {
             </div>
             <div className="pointer-events-auto">
                 <VoiceSelector />
+            </div>
+            <div className="pointer-events-auto">
+                <SleepTimer onStop={handleTimerStop} />
             </div>
             <div className="pointer-events-auto">
                 <button 
