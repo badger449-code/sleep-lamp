@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useStoryMachine } from './hooks/useStoryMachine';
 import { useWakeWord } from './hooks/useWakeWord';
+import { useWakeLock } from './hooks/useWakeLock';
 import { VoiceSelector } from './components/common/VoiceSelector';
 import { NoiseControl } from './components/common/NoiseControl';
 import { SleepTimer } from './components/common/SleepTimer';
@@ -40,6 +41,10 @@ function App() {
   const [mainPaddingBottom, setMainPaddingBottom] = useState(128);
   const [wakeWordEnabled, setWakeWordEnabled] = useState(false);
   const [timerActive, setTimerActive] = useState(false);
+  const [keepScreenOn, setKeepScreenOn] = useState(true); // 默认开启屏幕常亮
+  
+  // 屏幕常亮
+  const { isWakeLockActive } = useWakeLock(keepScreenOn && status === 'playing');
 
   // Handle manual input detection (keyboard/touch) to activate the session
   useEffect(() => {
@@ -438,6 +443,27 @@ function App() {
                   <Ear size={14} className={`sm:w-[16px] sm:h-[16px] ${isWakeWordListening ? 'animate-pulse text-cyan-400' : ''}`} />
                   <span className="text-[11px] sm:text-sm font-light">唤醒: {wakeWordEnabled ? '开' : '关'}</span>
                 </button>
+            <div className="pointer-events-auto">
+                <button 
+                  onClick={() => setKeepScreenOn(prev => !prev)}
+                  title={keepScreenOn ? '屏幕常亮中（防止睡着后自动锁屏）' : '屏幕自动关闭'}
+                  className={`
+                    flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-full 
+                    bg-slate-800/60 backdrop-blur-md border border-slate-700/50 
+                    transition-all duration-300 shadow-lg
+                    ${keepScreenOn ? 'text-yellow-400 ring-1 ring-yellow-500/50 bg-slate-800' : 'text-slate-400 hover:bg-slate-700/60'}
+                  `}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="sm:w-[16px] sm:h-[16px]">
+                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                    <line x1="8" y1="21" x2="16" y2="21"></line>
+                    <line x1="12" y1="17" x2="12" y2="21"></line>
+                  </svg>
+                  <span className="text-[11px] sm:text-sm font-light">
+                    {keepScreenOn ? '常亮：开' : '常亮：关'}
+                  </span>
+                </button>
+            </div>
             </div>
         </div>
 
@@ -513,6 +539,27 @@ function App() {
             className={`transition-colors duration-300 sm:w-[32px] sm:h-[32px] ${status === 'listening' ? 'text-white drop-shadow-[0_0_5px_rgba(255,255,255,0.8)]' : 'text-slate-400 group-hover:text-slate-200'}`} 
           />
         </button>
+            <div className="pointer-events-auto">
+                <button 
+                  onClick={() => setKeepScreenOn(prev => !prev)}
+                  title={keepScreenOn ? '屏幕常亮中（防止睡着后自动锁屏）' : '屏幕自动关闭'}
+                  className={`
+                    flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-full 
+                    bg-slate-800/60 backdrop-blur-md border border-slate-700/50 
+                    transition-all duration-300 shadow-lg
+                    ${keepScreenOn ? 'text-yellow-400 ring-1 ring-yellow-500/50 bg-slate-800' : 'text-slate-400 hover:bg-slate-700/60'}
+                  `}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="sm:w-[16px] sm:h-[16px]">
+                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                    <line x1="8" y1="21" x2="16" y2="21"></line>
+                    <line x1="12" y1="17" x2="12" y2="21"></line>
+                  </svg>
+                  <span className="text-[11px] sm:text-sm font-light">
+                    {keepScreenOn ? '常亮：开' : '常亮：关'}
+                  </span>
+                </button>
+            </div>
       </div>
     </div>
   );
