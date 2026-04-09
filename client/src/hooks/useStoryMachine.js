@@ -349,11 +349,13 @@ export const useStoryMachine = (noiseControlRef) => {
         audioBuffer = await ctx.decodeAudioData(chunk.slice(0));
       } catch (e) {
         console.error('Failed to decode audio chunk:', e.message);
+        isDecodingRef.current = false;
         return;
       }
 
       if (!audioBuffer || audioBuffer.duration === 0) {
         console.warn('Skipping invalid audio buffer');
+        isDecodingRef.current = false;
         return;
       }
 
