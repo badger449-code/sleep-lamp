@@ -10,7 +10,7 @@ import { generateAudioStream } from './services/ttsService.js';
 import { parseVoiceParamsFromPrompt } from './services/promptParser.js';
 import { transcribeAudio } from './services/asrService.js';
 
-import { InteractionManager } from './services/interactionService.js';
+import { InteractionManager } from './services/enhancedInteractionService.js';
 import { filterSensitiveWords } from './services/safetyService.js';
 import { processUserInput } from './services/emotionService.js';
 import { createRequire } from 'module';
@@ -92,43 +92,72 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
   
   let enhancedSystemPrompt = systemPrompt || '';
   
-  if (emotionResult.shouldUsePsychologyApproach) {
-    // 如果检测到特定情绪，使用心理学专业话术
+  // 检查是否是阶段2（情绪共情与深度放松）的典型输入
+  // 根据prompts.js，阶段2处理负面情绪，需要心理学知识进行深度放松引导
+  const isStage2Input = prompt.includes('今天') || prompt.includes('心情') || 
+                       prompt.includes('感觉') || prompt.includes('难过') || 
+                       prompt.includes('伤心') || prompt.includes('焦虑') ||
+                       prompt.includes('失恋') || prompt.includes('沮丧') ||
+                       prompt.includes('委屈') || prompt.includes('后悔') ||
+                       prompt.includes('压力') || prompt.includes('烦恼') ||
+                       prompt.includes('不开心') || prompt.includes('痛苦') ||
+                       prompt.includes('生气') || prompt.includes('愤怒') ||
+                       prompt.includes('恐惧') || prompt.includes('害怕') ||
+                       prompt.includes('孤独') || prompt.includes('无助');
+  
+  if (emotionResult.shouldUsePsychologyApproach || isStage2Input) {
+    // 如果检测到特定情绪或类似阶段2的输入，使用心理学专业话术
     enhancedSystemPrompt += `\n[情绪分析：检测到用户当前处于${emotionResult.emotionAnalysis.emotion}状态，匹配关键词：${emotionResult.emotionAnalysis.matchedKeywords.join(', ')}]`;
     enhancedSystemPrompt += `\n[心理学干预：根据人本主义流派原则，采用无条件积极关注，慢语速、低音调，允许不完美，优先处理情绪而非解决问题]`;
+    enhancedSystemPrompt += `\n[阶段2扩展：当前处于情绪共情与深度放松阶段，可突破6轮限制，运用心理学专业知识进行深度疏导]`;
     
-    // 使用技能系统处理情绪
-    const skillResult = executeEmotionSkill(prompt, { 
-      userInput: prompt,
-      emotionAnalysis: emotionResult.emotionAnalysis 
-    });
-    
-    // 直接发送心理学专业响应
-    const psychologyResponse = skillResult.response;
-    safeSend({ type: 'text_chunk', content: psychologyResponse });
-    
-    const voiceParams = await parseVoiceParamsFromPrompt("");
-    const audioStream = await generateAudioStream(psychologyResponse, voiceParams);
-    audioStream.on('data', (c) => safeSend({ type: 'audio_chunk', content: c.toString('base64') }));
-    
-    // 不立即结束，而是继续正常流程以维持对话连贯性
-  } else {
-    // 如果没有检测到特定情绪，使用原有的交互管理器
-    const flowResult = await ws.interactionManager.processInput(prompt);
-    
-    // If safety intervention is needed
-    if (flowResult.stage === 'SAFETY_INTERVENTION') {
-      safeSend({ type: 'text_chunk', content: flowResult.text });
+    // 使用技能系统处理情绪（仅在明确检测到情绪时）
+    if (emotionResult.shouldUsePsychologyApproach) {
+      const skillResult = executeEmotionSkill(prompt, { 
+        userInput: prompt,
+        emotionAnalysis: emotionResult.emotionAnalysis 
+      });
+      
+      // 直接发送心理学专业响应
+      const psychologyResponse = skillResult.response;
+      safeSend({ type: 'text_chunk', content: psychologyResponse });
+      
       const voiceParams = await parseVoiceParamsFromPrompt("");
-      const audioStream = await generateAudioStream(flowResult.text, voiceParams);
+      const audioStream = await generateAudioStream(psychologyResponse, voiceParams);
       audioStream.on('data', (c) => safeSend({ type: 'audio_chunk', content: c.toString('base64') }));
-      audioStream.on('end', () => safeSend({ type: 'story_end' }));
-      return;
+      
+      // 不立即结束，而是继续正常流程以维持对话连贯性
     }
-
-    // Enhanced system prompt with flow context
-    enhancedSystemPrompt += `\n[系统状态：当前处于${flowResult.stage}阶段，情绪追问：${flowResult.rounds}/6，故事对话：${flowResult.storyRounds}/5。请严格按 prompts.js 流程回复]`;
   }
+  
+  // 继续原有的交互管理器流程，让prompts.js的阶段逻辑正常运行
+  let flowResult;
+  try {
+    flowResult = await ws.interactionManager.processInput(prompt);
+  } catch (e) {
+    console.error('InteractionManager error:', e);
+    // 如果增强版管理器出错，使用默认结果
+    flowResult = {
+      stage: 'stage1',
+      rounds: 0,
+      storyRounds: 0,
+      text: '',
+      shouldContinue: true
+    };
+  }
+  
+  // If safety intervention is needed
+  if (flowResult.stage === 'SAFETY_INTERVENTION') {
+    safeSend({ type: 'text_chunk', content: flowResult.text });
+    const voiceParams = await parseVoiceParamsFromPrompt("");
+    const audioStream = await generateAudioStream(flowResult.text, voiceParams);
+    audioStream.on('data', (c) => safeSend({ type: 'audio_chunk', content: c.toString('base64') }));
+    audioStream.on('end', () => safeSend({ type: 'story_end' }));
+    return;
+  }
+
+  // Enhanced system prompt with flow context
+  enhancedSystemPrompt += `\n[系统状态：当前处于${flowResult.stage}阶段，情绪追问：${flowResult.rounds}/6，故事对话：${flowResult.storyRounds}/5。请严格按 prompts.js 流程回复]`;
 
   // Add user prompt to history
   ws.history.push({ role: 'user', content: prompt });
