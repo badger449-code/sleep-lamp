@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sleep Lamp Connection Test</title>
+</head>
+<body>
+    <h1>Sleep Lamp Connection Test</h1>
+    <div id="status">Testing connection...</div>
+    <div id="ws-status">WebSocket status: disconnected</div>
+    
+    <script>
+        // Test basic API connectivity
+        fetch('http://localhost:3000/')
+            .then(response => response.text())
+            .then(data => {
+                document.getElementById('status').innerHTML = '✅ Backend API: ' + data;
+                
+                // Test WebSocket connection
+                const wsStatus = document.getElementById('ws-status');
+                wsStatus.innerHTML = 'WebSocket status: connecting...';
+                
+                const ws = new WebSocket('ws://localhost:3000/ws');
+                
+                ws.onopen = function(event) {
+                    wsStatus.innerHTML = '✅ WebSocket status: connected';
+                    ws.send(JSON.stringify({type: 'ping', content: 'test'}));
+                };
+                
+                ws.onmessage = function(event) {
+                    wsStatus.innerHTML += '<br>Received: ' + event.data;
+                };
+                
+                ws.onerror = function(error) {
+                    wsStatus.innerHTML = '❌ WebSocket error: ' + error.message;
+                };
+                
+                ws.onclose = function(event) {
+                    if(event.code !== 1000) {
+                        wsStatus.innerHTML = '❌ WebSocket closed unexpectedly: ' + event.code + ' ' + event.reason;
+                    }
+                };
+            })
+            .catch(error => {
+                document.getElementById('status').innerHTML = '❌ Backend API error: ' + error.message;
+            });
+    </script>
+</body>
+</html>

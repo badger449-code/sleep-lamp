@@ -18,7 +18,7 @@ const delay = ms => new Promise(res => setTimeout(res, ms));
 
 async function fetchAudioFromDashScope(text, voice) {
   const apiKey = process.env.TTS_API_KEY || process.env.DASHSCOPE_API_KEY || '';
-  const pythonScript = process.env.TTS_PYTHON_BRIDGE || path.resolve(__dirname, '../../scripts/tts_bridge.py');
+  const pythonScript = process.env.TTS_PYTHON_BRIDGE || path.resolve(__dirname, '../../scripts/tts_final_bridge.py');
   
   if (!apiKey) {
     throw new Error('TTS_API_KEY or DASHSCOPE_API_KEY is not set in environment variables');
@@ -30,11 +30,10 @@ async function fetchAudioFromDashScope(text, voice) {
       '--text', text,
       '--voice', voice,
       '--api-key', apiKey,
-      '--stdout',
-      '--stream'
+      '--stdout'
     ];
 
-    const proc = spawn('python', args, {
+    const proc = spawn('python3.11', args, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     });

@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-const API_KEY = process.env.TTS_API_KEY || 'YOUR_API_KEY_HERE';
+const API_KEY = process.env.TTS_API_KEY || 'sk-7e32b11d13d04652bb234d90976b5521';
 const API_URL = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/text-to-audio';
 const MODEL = 'qwen3-tts-vd-2026-01-26';
 

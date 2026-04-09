@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-DashScope TTS Python Bridge
+DashScope TTS Python Bridge - Fixed Version
 用于从 Node.js 调用 Python TTS SDK
 """
+
+# Fix for typing compatibility issue
+try:
+    from typing import Final, Set
+except ImportError:
+    # If Final is not available in typing, import from typing_extensions
+    from typing_extensions import Final
+    Set = set
 
 import os
 import sys
@@ -16,15 +24,8 @@ import urllib.request
 import site
 site.addsitedir(os.path.expanduser("~/.local/lib/python3.11/site-packages"))
 
-try:
-    from typing import Final, Set
-except ImportError:
-    from typing_extensions import Final
-    Set = set
 import dashscope
 from dashscope import MultiModalConversation
-
-dashscope.base_http_api_url = 'https://dashscope.aliyuncs.com/api/v1'
 
 def download_audio(url):
     """从 URL 下载音频文件"""
@@ -42,7 +43,7 @@ def synthesize_to_file(text, voice, language, api_key, output_file, to_stdout=Fa
     try:
         response = MultiModalConversation.call(
             api_key=api_key,
-            model='qwen3-tts-flash',
+            model='qwen3-tts-vd-2026-01-26',  # Updated model
             text=text,
             voice=voice,
             language_type=language,
@@ -102,7 +103,7 @@ def synthesize_streaming(text, voice, language, api_key, output_file=None, to_st
     try:
         response = MultiModalConversation.call(
             api_key=api_key,
-            model='qwen3-tts-flash',
+            model='qwen3-tts-vd-2026-01-26',  # Updated model
             text=text,
             voice=voice,
             language_type=language,
@@ -159,9 +160,9 @@ def main():
         msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
 
     if args.stream or args.stdout:
-        success = synthesize_streaming(args.text, args.voice, args.language, args.api_key, args.output, args.stdout)
+        success = synthesize_streaming(args.text, args.voice, args.language, args.api_key, args.output if not args.stdout else None, args.stdout)
     else:
-        success = synthesize_to_file(args.text, args.voice, args.language, args.api_key, args.output)
+        success = synthesize_to_file(args.text, args.voice, args.language, args.api_key, args.output, args.stdout)
 
     sys.exit(0 if success else 1)
 
