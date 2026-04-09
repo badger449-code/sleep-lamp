@@ -105,6 +105,8 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
                        prompt.includes('恐惧') || prompt.includes('害怕') ||
                        prompt.includes('孤独') || prompt.includes('无助');
   
+  let psychologyHandled = false; // 标记心理学技能是否已处理
+  
   if (emotionResult.shouldUsePsychologyApproach || isStage2Input) {
     // 如果检测到特定情绪或类似阶段2的输入，使用心理学专业话术
     enhancedSystemPrompt += `\n[情绪分析：检测到用户当前处于${emotionResult.emotionAnalysis.emotion}状态，匹配关键词：${emotionResult.emotionAnalysis.matchedKeywords.join(', ')}]`;
@@ -122,18 +124,40 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
       const psychologyResponse = skillResult.response;
       safeSend({ type: 'text_chunk', content: psychologyResponse });
       
-      const voiceParams = await parseVoiceParamsFromPrompt("");
+      // 使用用户选定的音色，而不是重新解析，避免音色切换
+      const voiceParams = { id: voiceId || 'Kai' }; // 使用用户选定的音色
       const audioStream = await generateAudioStream(psychologyResponse, voiceParams);
-      audioStream.on('data', (c) => safeSend({ type: 'audio_chunk', content: c.toString('base64') }));
+      audioStream.on('data', (c) => {
+        if (c && c.length > 0) { // 确保音频数据有效
+          safeSend({ type: 'audio_chunk', content: c.toString('base64') });
+        }
+      });
+      audioStream.on('error', (err) => {
+        console.error('Audio stream error:', err);
+      });
+      
+      psychologyHandled = true; // 标记心理学技能已处理
       
       // 不立即结束，而是继续正常流程以维持对话连贯性
     }
   }
   
   // 继续原有的交互管理器流程，让prompts.js的阶段逻辑正常运行
+  // 但如果心理学技能已经处理了，则跳过原有流程以避免重复
   let flowResult;
   try {
-    flowResult = await ws.interactionManager.processInput(prompt);
+    if (!psychologyHandled) {
+      flowResult = await ws.interactionManager.processInput(prompt);
+    } else {
+      // 如果心理学技能已处理，则使用默认结果继续流程
+      flowResult = {
+        stage: 'stage2',  // 心理学处理属于阶段2
+        rounds: 0,
+        storyRounds: 0,
+        text: '',
+        shouldContinue: true
+      };
+    }
   } catch (e) {
     console.error('InteractionManager error:', e);
     // 如果增强版管理器出错，使用默认结果
@@ -163,13 +187,20 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
   ws.history.push({ role: 'user', content: prompt });
   
   // Parse voice params from systemPrompt (or user prompt) asynchronously
-  const textToParse = enhancedSystemPrompt + " " + prompt;
-  const voiceParamsPromise = parseVoiceParamsFromPrompt(textToParse).then(params => {
-    if (ws.lastVoiceId) {
-      params.id = ws.lastVoiceId;
-    }
-    return params;
-  });
+  // But only when we're not handling psychology skill responses to prevent voice switching
+  let voiceParamsPromise;
+  if (emotionResult.shouldUsePsychologyApproach) {
+    // For psychology skill responses, use the user-selected voice to maintain consistency
+    voiceParamsPromise = Promise.resolve({ id: voiceId || ws.lastVoiceId || 'Kai' });
+  } else {
+    const textToParse = enhancedSystemPrompt + " " + prompt;
+    voiceParamsPromise = parseVoiceParamsFromPrompt(textToParse).then(params => {
+      if (ws.lastVoiceId) {
+        params.id = ws.lastVoiceId;
+      }
+      return params;
+    });
+  }
 
   // Use an async generator to stream text from LLM
   let buffer = '';

@@ -341,41 +341,83 @@ export const useStoryMachine = (noiseControlRef) => {
         }, remainingMs + 20);
       };
 
+      // Process items in queue sequentially to ensure smooth playback
       while (audioQueueRef.current.length > 0) {
         const item = audioQueueRef.current.shift();
+        if (!item) {
+          continue;
+        }
+        
         const chunk = item && item.audioData ? item.audioData : item;
         const pauseMs = item && typeof item.pauseMs === 'number' ? item.pauseMs : defaultPauseMs;
-        if (!chunk || chunk.byteLength === 0) continue;
-
-        let audioBuffer;
-        try {
-          const bufferCopy = chunk.slice(0);
-          audioBuffer = await new Promise((resolve, reject) => {
-            try {
-              ctx.decodeAudioData(
-                bufferCopy,
-                resolve,
-                (err) => reject(err || new Error('decodeAudioData error'))
-              );
-            } catch (e) {
-              reject(e);
-            }
-          });
-        } catch (e) {
+        if (!chunk || chunk.byteLength === 0) {
           continue;
         }
 
-        if (!audioBuffer || audioBuffer.duration === 0) continue;
+        let audioBuffer;
+        try {
+          // Validate the chunk before attempting to decode
+          if (!(chunk instanceof ArrayBuffer) && typeof chunk === 'object' && chunk.byteLength !== undefined) {
+            // If it's already an ArrayBuffer-like object, use it directly
+            audioBuffer = await ctx.decodeAudioData(chunk.slice(0));
+          } else if (chunk instanceof ArrayBuffer) {
+            audioBuffer = await ctx.decodeAudioData(chunk);
+          } else {
+            // If it's a base64 string, it should have been converted earlier
+            console.error('Invalid audio data format:', typeof chunk);
+            continue;
+          }
+        } catch (e) {
+          console.error('Failed to decode audio chunk:', e.message);
+          continue;
+        }
+
+        if (!audioBuffer || audioBuffer.duration === 0) {
+          console.warn('Skipping invalid audio buffer');
+          continue;
+        }
 
         let startTime = scheduledTimeRef.current;
         const minStart = ctx.currentTime + startPadding;
         if (!startTime || startTime < minStart) startTime = minStart;
 
+        // Properly handle ongoing audio to prevent conflicts
+        if (isPlayingRef.current) {
+          // If we're currently playing and getting new audio, 
+          // we should wait for the current audio to finish or stop it gracefully
+          const sources = [...activeSourcesRef.current];
+          activeSourcesRef.current = [];
+          for (const source of sources) {
+            try {
+              if (source.context.state !== 'closed') {
+                source.onended = null;
+                // Only stop if the source is still playing
+                if (source.context.state === 'running' && source.playbackState !== 'finished') {
+                  try {
+                    source.stop();
+                  } catch (e) {
+                    // Source may already be stopped, ignore error
+                  }
+                }
+              }
+            } catch (e) {
+              // Ignore errors when stopping sources
+            }
+          }
+          isPlayingRef.current = false;
+        }
+
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
         activeSourcesRef.current.push(source);
-        source.onended = () => {
+        
+        // Create a reference to remove from active sources when done
+        const removeSource = () => {
           activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
+        };
+        
+        source.onended = () => {
+          removeSource();
         };
 
         const gain = ctx.createGain();
@@ -398,7 +440,12 @@ export const useStoryMachine = (noiseControlRef) => {
         isPlayingRef.current = true;
         setStatus('playing');
         scheduleEndTimer();
+        
+        // Wait a bit before processing the next chunk to avoid overwhelming the audio context
+        await new Promise(resolve => setTimeout(resolve, 10));
       }
+    } catch (error) {
+      console.error('Error in playNextChunk:', error);
     } finally {
       isDecodingRef.current = false;
     }
