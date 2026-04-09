@@ -125,7 +125,7 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
       safeSend({ type: 'text_chunk', content: psychologyResponse });
       
       // 使用用户选定的音色，而不是重新解析，避免音色切换
-      const voiceParams = { id: voiceId || 'Kai' }; // 使用用户选定的音色
+      const voiceParams = { id: voiceId || ws.lastVoiceId || 'Kai' }; // 使用用户选定的音色
       const audioStream = await generateAudioStream(psychologyResponse, voiceParams);
       audioStream.on('data', (c) => {
         if (c && c.length > 0) { // 确保音频数据有效
