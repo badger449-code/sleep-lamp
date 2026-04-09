@@ -288,9 +288,28 @@ export const useStoryMachine = (noiseControlRef) => {
     setStatus('idle');
   }, []);
   
-  // Play audio queue
+  // Play audio queue - FIXED VERSION
   const playNextChunk = async () => {
-    if (isDecodingRef.current || audioQueueRef.current.length === 0) return;
+    if (isDecodingRef.current) return;
+    
+    // Process only one chunk at a time, but keep calling until queue is empty
+    if (audioQueueRef.current.length === 0) {
+      // If queue is empty and no more server processing, check if we should transition state
+      if (!isServerProcessingRef.current && !isPlayingRef.current) {
+        if (continuousModeRef.current) {
+          console.log('AI finished. Starting input session...');
+          startListening({ continuous: true });
+        } else {
+          setStatus('idle');
+          setInteractionStatus('idle');
+          if (pendingNoiseDecayRef.current && noiseControlRef?.current) {
+            noiseControlRef.current.startDecay({ durationMs: pendingNoiseDecayRef.current });
+            pendingNoiseDecayRef.current = null;
+          }
+        }
+      }
+      return;
+    }
 
     isDecodingRef.current = true;
     try {
@@ -314,139 +333,105 @@ export const useStoryMachine = (noiseControlRef) => {
       const fadeOutSeconds = 0;
       const defaultPauseMs = 220;
 
-      const scheduleEndTimer = () => {
-        if (!playbackEndTimerRef.current && !isPlayingRef.current) return;
-        if (playbackEndTimerRef.current) {
-          clearTimeout(playbackEndTimerRef.current);
-          playbackEndTimerRef.current = null;
-        }
-        const remainingMs = Math.max(0, (scheduledTimeRef.current - ctx.currentTime) * 1000);
-        playbackEndTimerRef.current = setTimeout(() => {
-          isPlayingRef.current = false;
-          playbackEndTimerRef.current = null;
-          if (audioQueueRef.current.length === 0 && !isServerProcessingRef.current) {
-            // New logic: AI output completely finished, transition to waiting state if in continuous mode
-            if (continuousModeRef.current) {
-              console.log('AI finished. Starting input session...');
-              startListening({ continuous: true });
-            } else {
-              setStatus('idle');
-              setInteractionStatus('idle');
-              if (pendingNoiseDecayRef.current && noiseControlRef?.current) {
-                noiseControlRef.current.startDecay({ durationMs: pendingNoiseDecayRef.current });
-                pendingNoiseDecayRef.current = null;
-              }
-            }
-          }
-        }, remainingMs + 20);
-      };
+      const item = audioQueueRef.current.shift();
+      if (!item) {
+        return;
+      }
+      
+      const chunk = item && item.audioData ? item.audioData : item;
+      const pauseMs = item && typeof item.pauseMs === 'number' ? item.pauseMs : defaultPauseMs;
+      if (!chunk || chunk.byteLength === 0) {
+        return;
+      }
 
-      // Process items in queue sequentially to ensure smooth playback
-      while (audioQueueRef.current.length > 0) {
-        const item = audioQueueRef.current.shift();
-        if (!item) {
-          continue;
+      let audioBuffer;
+      try {
+        audioBuffer = await ctx.decodeAudioData(chunk.slice(0));
+      } catch (e) {
+        console.error('Failed to decode audio chunk:', e.message);
+        return;
+      }
+
+      if (!audioBuffer || audioBuffer.duration === 0) {
+        console.warn('Skipping invalid audio buffer');
+        return;
+      }
+
+      // Calculate start time ensuring no gaps in playback
+      let startTime = scheduledTimeRef.current;
+      const minStart = Math.max(ctx.currentTime + startPadding, startTime);
+      startTime = minStart;
+
+      // Create audio source and gain node
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0, startTime);
+      gain.gain.linearRampToValueAtTime(1, startTime + fadeInSeconds);
+
+      const endTime = startTime + audioBuffer.duration;
+      if (fadeOutSeconds > 0) {
+        const fadeOutStart = Math.max(startTime, endTime - fadeOutSeconds);
+        gain.gain.setValueAtTime(1, fadeOutStart);
+        gain.gain.linearRampToValueAtTime(0, endTime);
+      }
+
+      source.connect(gain);
+      gain.connect(ctx.destination);
+
+      source.start(startTime);
+
+      // Update scheduled time for next chunk
+      scheduledTimeRef.current = endTime + (pauseMs / 1000);
+      isPlayingRef.current = true;
+      setStatus('playing');
+      
+      // When this source finishes, process next chunk
+      source.onended = () => {
+        // Clean up this source from active sources
+        activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
+        
+        // Reset playing flag if no more scheduled audio
+        const timeUntilNext = scheduledTimeRef.current - ctx.currentTime;
+        if (timeUntilNext <= 0.1) { // If no more audio scheduled soon
+          isPlayingRef.current = false;
         }
         
-        const chunk = item && item.audioData ? item.audioData : item;
-        const pauseMs = item && typeof item.pauseMs === 'number' ? item.pauseMs : defaultPauseMs;
-        if (!chunk || chunk.byteLength === 0) {
-          continue;
-        }
-
-        let audioBuffer;
-        try {
-          // Validate the chunk before attempting to decode
-          if (!(chunk instanceof ArrayBuffer) && typeof chunk === 'object' && chunk.byteLength !== undefined) {
-            // If it's already an ArrayBuffer-like object, use it directly
-            audioBuffer = await ctx.decodeAudioData(chunk.slice(0));
-          } else if (chunk instanceof ArrayBuffer) {
-            audioBuffer = await ctx.decodeAudioData(chunk);
-          } else {
-            // If it's a base64 string, it should have been converted earlier
-            console.error('Invalid audio data format:', typeof chunk);
-            continue;
-          }
-        } catch (e) {
-          console.error('Failed to decode audio chunk:', e.message);
-          continue;
-        }
-
-        if (!audioBuffer || audioBuffer.duration === 0) {
-          console.warn('Skipping invalid audio buffer');
-          continue;
-        }
-
-        let startTime = scheduledTimeRef.current;
-        const minStart = ctx.currentTime + startPadding;
-        if (!startTime || startTime < minStart) startTime = minStart;
-
-        // Properly handle ongoing audio to prevent conflicts
-        if (isPlayingRef.current) {
-          // If we're currently playing and getting new audio, 
-          // we should wait for the current audio to finish or stop it gracefully
-          const sources = [...activeSourcesRef.current];
-          activeSourcesRef.current = [];
-          for (const source of sources) {
-            try {
-              if (source.context.state !== 'closed') {
-                source.onended = null;
-                // Only stop if the source is still playing
-                if (source.context.state === 'running' && source.playbackState !== 'finished') {
-                  try {
-                    source.stop();
-                  } catch (e) {
-                    // Source may already be stopped, ignore error
+        // Process next chunk in queue
+        isDecodingRef.current = false;
+        setTimeout(() => {
+          // Continue processing queue if there are more chunks or if still playing
+          if (audioQueueRef.current.length > 0) {
+            playNextChunk();
+          } else if (isPlayingRef.current) {
+            // Still playing but no more chunks - wait for scheduled end time
+            const remainingTime = scheduledTimeRef.current - ctx.currentTime;
+            if (remainingTime <= 0.1) {
+              isPlayingRef.current = false;
+              if (!isServerProcessingRef.current) {
+                if (continuousModeRef.current) {
+                  console.log('AI finished. Starting input session...');
+                  startListening({ continuous: true });
+                } else {
+                  setStatus('idle');
+                  setInteractionStatus('idle');
+                  if (pendingNoiseDecayRef.current && noiseControlRef?.current) {
+                    noiseControlRef.current.startDecay({ durationMs: pendingNoiseDecayRef.current });
+                    pendingNoiseDecayRef.current = null;
                   }
                 }
               }
-            } catch (e) {
-              // Ignore errors when stopping sources
             }
           }
-          isPlayingRef.current = false;
-        }
-
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        activeSourcesRef.current.push(source);
-        
-        // Create a reference to remove from active sources when done
-        const removeSource = () => {
-          activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
-        };
-        
-        source.onended = () => {
-          removeSource();
-        };
-
-        const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0, startTime);
-        gain.gain.linearRampToValueAtTime(1, startTime + fadeInSeconds);
-
-        const endTime = startTime + audioBuffer.duration;
-        if (fadeOutSeconds > 0) {
-          const fadeOutStart = Math.max(startTime, endTime - fadeOutSeconds);
-          gain.gain.setValueAtTime(1, fadeOutStart);
-          gain.gain.linearRampToValueAtTime(0, endTime);
-        }
-
-        source.connect(gain);
-        gain.connect(ctx.destination);
-
-        source.start(startTime);
-
-        scheduledTimeRef.current = endTime + (pauseMs / 1000);
-        isPlayingRef.current = true;
-        setStatus('playing');
-        scheduleEndTimer();
-        
-        // Wait a bit before processing the next chunk to avoid overwhelming the audio context
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
+        }, 10); // Small delay to allow proper cleanup
+      };
+      
+      // Add to active sources for cleanup
+      activeSourcesRef.current.push(source);
+      
     } catch (error) {
       console.error('Error in playNextChunk:', error);
-    } finally {
       isDecodingRef.current = false;
     }
   };

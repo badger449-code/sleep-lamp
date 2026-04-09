@@ -257,7 +257,10 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
             }
             resolve();
           });
-          audioStream.on('error', resolve);
+          audioStream.on('error', (err) => {
+            console.error('Audio stream error:', err);
+            resolve();
+          });
         });
       } catch (e) {
         console.error('TTS Generation error:', e.message);
