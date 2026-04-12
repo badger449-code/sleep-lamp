@@ -1,0 +1,11 @@
+{
+  "owner": "npfaerber",
+  "slug": "nodejs-security-audit",
+  "displayName": "Node.js Security Audit",
+  "latest": {
+    "version": "1.0.0",
+    "publishedAt": 1772263565537,
+    "commit": "https://github.com/openclaw/skills/commit/3529d263f2947988e08e02301f3fcef1a102b16e"
+  },
+  "history": []
+}

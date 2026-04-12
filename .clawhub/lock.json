@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "skills": {
+    "skill-vetter": {
+      "version": "1.0.0",
+      "installedAt": 1775012233768
+    },
+    "proactive-agent": {
+      "version": "3.1.0",
+      "installedAt": 1775012281317
+    },
+    "sonoscli": {
+      "version": "1.0.0",
+      "installedAt": 1775579785325
+    },
+    "frontend-performance-audit": {
+      "version": "1.0.0",
+      "installedAt": 1775579937671
+    },
+    "anthropic-frontend-design": {
+      "version": "1.1.0",
+      "installedAt": 1775579957994
+    },
+    "code-review-pro": {
+      "version": "1.0.0",
+      "installedAt": 1775579964366
+    },
+    "playwright-browser-automation": {
+      "version": "2.0.0",
+      "installedAt": 1775757575524
+    },
+    "nodejs-security-audit": {
+      "version": "1.0.0",
+      "installedAt": 1775759477823
+    },
+    "agent-security-audit": {
+      "version": "1.0.0",
+      "installedAt": 1775759498386
+    },
+    "websocket-reconnect": {
+      "version": "1.0.0",
+      "installedAt": 1775759528565
+    },
+    "sleep-story": {
+      "version": "1.0.0",
+      "installedAt": 1775759751000
+    }
+  }
+}
