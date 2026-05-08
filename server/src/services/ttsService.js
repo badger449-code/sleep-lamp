@@ -1,10 +1,6 @@
 import { Readable } from 'stream';
-import { spawn } from 'child_process';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import https from 'https';
+import http from 'http';
 
 let failureCount = 0;
 let circuitBreakerTrippedUntil = 0;
@@ -16,53 +12,67 @@ export const resetCircuitBreaker = () => {
 
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
+/**
+ * Generate TTS audio stream using DashScope HTTP API directly (no Python)
+ * API: https://dashscope.aliyuncs.com/api/v1/services/audiogen/speech-generate
+ */
 async function fetchAudioFromDashScope(text, voice) {
   const apiKey = process.env.TTS_API_KEY || process.env.DASHSCOPE_API_KEY || '';
-  const pythonScript = process.env.TTS_PYTHON_BRIDGE || path.resolve(__dirname, '../../scripts/tts_final_bridge.py');
+  const apiUrl = process.env.TTS_API_URL || 'https://dashscope.aliyuncs.com/api/v1';
+  const model = process.env.TTS_MODEL || 'qwen3-tts-flash';
   
   if (!apiKey) {
-    throw new Error('TTS_API_KEY or DASHSCOPE_API_KEY is not set in environment variables');
+    throw new Error('TTS_API_KEY or DASHSCOPE_API_KEY is not set');
   }
 
   return new Promise((resolve, reject) => {
-    const args = [
-      pythonScript,
-      '--text', text,
-      '--voice', voice,
-      '--api-key', apiKey,
-      '--stdout'
-    ];
-
-    const proc = spawn('python3.11', args, {
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    let stderr = '';
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    // Resolve immediately with the stdout stream
-    // We'll also handle the error on the stream itself
-    resolve(proc.stdout);
-
-    proc.on('error', (err) => {
-      console.error(`Failed to start Python bridge: ${err.message}`);
-    });
-
-    proc.on('close', (code) => {
-      if (code !== 0) {
-        console.error(`Python bridge failed (code ${code}): ${stderr || 'Unknown error'}`);
+    const requestBody = JSON.stringify({
+      model: model,
+      input: { text: text },
+      parameters: {
+        voice: voice || 'Kai',
+        format: 'wav',
+        sample_rate: 24000,
+        volume: 50,
+        rate: 1.0
       }
     });
+
+    const url = new URL(apiUrl);
+    if (!url.pathname.includes('/services/audiogen/speech-generate')) {
+      url.pathname = '/api/v1/services/audiogen/speech-generate';
+    }
+
+    const client = url.protocol === 'https:' ? https : http;
+    
+    const req = client.request(url.toString(), {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'Accept': 'audio/wav'
+      }
+    }, (res) => {
+      if (res.statusCode === 200) {
+        resolve(res);
+      } else {
+        let errorData = '';
+        res.on('data', chunk => { errorData += chunk; });
+        res.on('end', () => {
+          reject(new Error(`TTS API error ${res.statusCode}: ${errorData}`));
+        });
+      }
+    });
+
+    req.on('error', reject);  // This was missing!
+    req.write(requestBody);
+    req.end();
   });
 }
 
 export const generateAudioStream = async function (text, voiceParams = {}, audioConfig = {}) {
-  // Circuit breaker check
   if (Date.now() < circuitBreakerTrippedUntil) {
-    throw new Error('TTS Service is currently unavailable (Circuit Breaker Tripped). Please try again later.');
+    throw new Error('TTS Service is currently unavailable (Circuit Breaker Tripped).');
   }
 
   if (voiceParams.speed !== undefined && (voiceParams.speed < 0.5 || voiceParams.speed > 2.0)) {
@@ -72,27 +82,21 @@ export const generateAudioStream = async function (text, voiceParams = {}, audio
     throw new Error('Invalid pitch');
   }
 
-  // Map voice params to model voices
-  let voice = 'Chelsie'; // default female voice (千雪)
+  let voice = 'Kai';
   if (voiceParams.id) {
     voice = voiceParams.id;
   } else if (voiceParams.gender === 'male') {
-    voice = 'Alloy'; // or other male voice
+    voice = 'Kai';
   }
 
-  // Retry logic with exponential backoff
   let attempt = 0;
   const maxAttempts = 3;
 
   while (attempt < maxAttempts) {
     try {
-      // The bridge returns a stream directly or we wrap the buffer in a stream
       const stream = await fetchAudioFromDashScope(text, voice);
-      
-      // Success, reset circuit breaker
       failureCount = 0;
       return stream;
-
     } catch (error) {
       attempt++;
       failureCount++;
@@ -100,8 +104,8 @@ export const generateAudioStream = async function (text, voiceParams = {}, audio
 
       if (failureCount >= 10) {
         console.error('[ALARM] TTS Circuit Breaker Tripped! Pausing for 60 seconds.');
-        circuitBreakerTrippedUntil = Date.now() + 60 * 1000; // 60s
-        failureCount = 0; // reset count after trip
+        circuitBreakerTrippedUntil = Date.now() + 60 * 1000;
+        failureCount = 0;
         throw new Error('TTS Service is currently unavailable (Circuit Breaker Tripped).');
       }
 
@@ -109,8 +113,7 @@ export const generateAudioStream = async function (text, voiceParams = {}, audio
         throw error;
       }
 
-      // Exponential backoff
-      await delay(Math.pow(2, attempt) * 500); // 1s, 2s
+      await delay(Math.pow(2, attempt) * 500);
     }
   }
 };

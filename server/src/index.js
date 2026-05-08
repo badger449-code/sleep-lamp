@@ -5,6 +5,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import path from 'path';
+import jwt from 'jsonwebtoken';
 import { streamStory } from './services/llmService.js';
 import { generateAudioStream } from './services/ttsService.js';
 import { parseVoiceParamsFromPrompt } from './services/promptParser.js';
@@ -19,11 +20,144 @@ import { executeEmotionSkill } from './skills/emotion_skills.js';
 
 dotenv.config();
 
+// =============================================================================
+// TTS 并行化：Semaphore 控制最多 3 并发，保证句子顺序不变
+// =============================================================================
+class Semaphore {
+  constructor(max) {
+    this.max = max;
+    this.count = 0;
+    this.waitQueue = [];
+  }
+
+  acquire() {
+    return new Promise(resolve => {
+      if (this.count < this.max) {
+        this.count++;
+        resolve();
+      } else {
+        this.waitQueue.push(resolve);
+      }
+    });
+  }
+
+  release() {
+    this.count--;
+    const next = this.waitQueue.shift();
+    if (next) {
+      this.count++;
+      next();
+    }
+  }
+}
+
+const TTS_CONCURRENCY = 3;
+const ttsSemaphore = new Semaphore(TTS_CONCURRENCY);
+
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(cors());
+// =============================================================================
+// SECURITY P0: CORS Whitelist - Only allow自有域名
+// =============================================================================
+const CORS_WHITELIST = ['yunmeng.com', 'www.yunmeng.com', 'app.yunmeng.com', 'localhost', '127.0.0.1'];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, WebSocket)
+    if (!origin) {
+      return callback(null, true);
+    }
+    // Check if origin is in whitelist (support subdomain wildcard)
+    const isAllowed = CORS_WHITELIST.some(allowed => {
+      if (allowed.startsWith('*.')) {
+        const baseDomain = allowed.substring(2);
+        return origin.endsWith(baseDomain) || origin.includes(baseDomain);
+      }
+      return origin.includes(allowed) || origin === allowed;
+    });
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      console.warn(`[CORS BLOCKED] Origin: ${origin} not in whitelist`);
+      const err = new Error('Origin not allowed');
+      err.corsError = true;
+      err.status = 403;
+      callback(err, false);
+    }
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
 app.use(express.json());
+
+// =============================================================================
+// SECURITY P0: JWT Authentication Middleware
+// =============================================================================
+const JWT_SECRET = process.env.JWT_SECRET || 'sleep-lamp-dev-secret-change-in-production';
+const JWT_OPTIONS = {
+  algorithms: ['HS256'],
+  clockTolerance: 30 // 30秒时钟容忍度
+};
+
+/**
+ * Verify JWT token from Authorization header
+ * Expected format: "Bearer <token>"
+ */
+function verifyToken(authHeader) {
+  if (!authHeader || typeof authHeader !== 'string') {
+    return { valid: false, error: 'MISSING_TOKEN', message: 'Authorization header required' };
+  }
+  const parts = authHeader.split(' ');
+  if (parts.length !== 2 || parts[0] !== 'Bearer') {
+    return { valid: false, error: 'INVALID_FORMAT', message: 'Expected format: Bearer <token>' };
+  }
+  const token = parts[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET, JWT_OPTIONS);
+    return { valid: true, decoded };
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return { valid: false, error: 'TOKEN_EXPIRED', message: 'Token has expired' };
+    }
+    if (err.name === 'JsonWebTokenError') {
+      return { valid: false, error: 'INVALID_TOKEN', message: 'Invalid token signature or malformed' };
+    }
+    return { valid: false, error: 'AUTH_FAILED', message: err.message };
+  }
+}
+
+/**
+ * JWT authentication middleware for HTTP endpoints
+ * Returns 401 if token is missing or invalid
+ * Skips OPTIONS requests (CORS preflight)
+ */
+function requireAuth(req, res, next) {
+  // Skip OPTIONS requests (handled by CORS middleware)
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+  
+  const authHeader = req.headers.authorization;
+  const result = verifyToken(authHeader);
+  
+  if (!result.valid) {
+    console.warn(`[AUTH FAILED] ${req.method} ${req.path} - ${result.error}: ${result.message}`);
+    return res.status(401).json({
+      error: result.error,
+      message: result.message
+    });
+  }
+  
+  // Attach decoded token to request for downstream use
+  req.user = result.decoded;
+  next();
+}
+
+// Apply JWT middleware to all /api/* routes
+app.use('/api', requireAuth);
 
 app.post('/api/tts/preview', async (req, res) => {
   try {
@@ -184,6 +318,7 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
   enhancedSystemPrompt += `\n[系统状态：当前处于${flowResult.stage}阶段，情绪追问：${flowResult.rounds}/6，故事对话：${flowResult.storyRounds}/5。请严格按 prompts.js 流程回复]`;
 
   // Add user prompt to history
+  trimHistory();
   ws.history.push({ role: 'user', content: prompt });
   
   // Parse voice params from systemPrompt (or user prompt) asynchronously
@@ -213,16 +348,14 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
   const SCENE_MARKER = /\[SCENE:\s*(\w+)\]/;
   const NOISE_DECAY_MARKER = '[NOISE_DECAY]';
   
-  // Create a queue for TTS generation to not block the LLM stream
-  let audioTaskChain = Promise.resolve();
+  // TTS 并行化配置：最多 3 句并行，字符上限提高以支持更大 batch
   let ttsSentenceBuffer = [];
   let ttsSentenceChars = 0;
   let ttsChunkIndex = 0;
-  // 优化：降低延迟，1 个句子就发送 TTS
-  const TTS_MIN_SENTENCES = 1;  // 从 2 改成 1，立即发送
-  const TTS_MAX_SENTENCES = 2;  // 从 4 改成 2，减少等待
-  const TTS_SOFT_MAX_CHARS = 80;  // 从 140 改成 80，更早触发
-  const TTS_HARD_MAX_CHARS = 150; // 从 260 改成 150，防止太长
+  const TTS_MIN_SENTENCES = 1;
+  const TTS_MAX_SENTENCES = 3;  // 最多 3 句并行（匹配 TTS_CONCURRENCY）
+  const TTS_SOFT_MAX_CHARS = 100;
+  const TTS_HARD_MAX_CHARS = 300; // 允许更长单次生成，提升并行效率
 
   const getPauseMs = (rawText) => {
     const text = (rawText || '').trim();
@@ -232,40 +365,96 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
     return 220;
   };
 
-  const queueTts = (text, pauseMs) => {
-    audioTaskChain = audioTaskChain.then(async () => {
-      if (isCancelled()) return;
-      console.log(`Generating audio for: "${text}"`);
-      try {
-        const voiceParams = await voiceParamsPromise;
-        const audioStream = await generateAudioStream(text, voiceParams, { format: 'wav', sample_rate: 24000 });
+  // TTS 并行化：Promise.all 批量并行，Semaphore 控制并发上限
+  const queueTtsBatch = async (sentences, startIndex) => {
+    if (sentences.length === 0 || isCancelled()) return;
 
-        const chunks = [];
-        audioStream.on('data', (audioChunk) => {
-          chunks.push(audioChunk);
-        });
+    // 并行获取所有句子的音频，最多 3 个并发
+    const results = await Promise.all(
+      sentences.map((item, i) => async () => {
+        await ttsSemaphore.acquire();
+        try {
+          if (isCancelled()) return null;
+          const { text, pauseMs, globalIndex } = item;
+          console.log(`[TTS Parallel] #${globalIndex} generating (concurrent: ${ttsSemaphore.count}): "${text.substring(0, 30)}..."`);
+          const voiceParams = await voiceParamsPromise;
+          const audioStream = await generateAudioStream(text, voiceParams, { format: 'wav', sample_rate: 24000 });
 
-        await new Promise((resolve) => {
-          audioStream.on('end', () => {
-            const completeBuffer = Buffer.concat(chunks);
-            if (completeBuffer.length > 0) {
-              safeSend({ 
-                type: 'audio_chunk', 
-                content: completeBuffer.toString('base64'),
-                pause_ms: pauseMs
-              });
-            }
-            resolve();
-          });
-          audioStream.on('error', (err) => {
-            console.error('Audio stream error:', err);
-            resolve();
-          });
+          const chunks = [];
+          for await (const chunk of audioStream) {
+            chunks.push(chunk);
+          }
+          const completeBuffer = Buffer.concat(chunks);
+          return { globalIndex, buffer: completeBuffer, pauseMs };
+        } catch (e) {
+          console.error(`[TTS Parallel] #${item.globalIndex} error: ${e.message}`);
+          return null;
+        } finally {
+          ttsSemaphore.release();
+        }
+      })()
+    );
+
+    // 按全局顺序发送，保证句子顺序不变
+    for (const result of results) {
+      if (result && result.buffer.length > 0) {
+        safeSend({
+          type: 'audio_chunk',
+          content: result.buffer.toString('base64'),
+          pause_ms: result.pauseMs
         });
-      } catch (e) {
-        console.error('TTS Generation error:', e.message);
       }
-    });
+    }
+  };
+
+  // 批量任务调度器：用 Promise.all + Semaphore 实现最多 3 并发
+  let pendingBatch = []; // 待调度的句子 [{text, pauseMs, globalIndex}]
+  let activePromises = []; // 当前进行中的 TTS Promise
+
+  const dispatchBatch = async () => {
+    if (pendingBatch.length === 0) return;
+
+    const batch = pendingBatch.splice(0, pendingBatch.length);
+    const maxConcurrent = TTS_CONCURRENCY;
+
+    // 把 batch 里的任务分成最多 maxConcurrent 组，每组 Promise.all 并行
+    for (let i = 0; i < batch.length; i += maxConcurrent) {
+      const group = batch.slice(i, i + maxConcurrent);
+      const promise = (async () => {
+        const results = await Promise.all(
+          group.map(async (item) => {
+            if (isCancelled()) return null;
+            await ttsSemaphore.acquire();
+            try {
+              if (isCancelled()) return null;
+              console.log(`[TTS Parallel] #${item.globalIndex} start: "${item.text.substring(0, 25)}..."`);
+              const voiceParams = await voiceParamsPromise;
+              const audioStream = await generateAudioStream(item.text, voiceParams, { format: 'wav', sample_rate: 24000 });
+              const chunks = [];
+              for await (const chunk of audioStream) {
+                chunks.push(chunk);
+              }
+              const completeBuffer = Buffer.concat(chunks);
+              return { globalIndex: item.globalIndex, buffer: completeBuffer, pauseMs: item.pauseMs };
+            } catch (e) {
+              console.error(`[TTS Parallel] #${item.globalIndex} error: ${e.message}`);
+              return null;
+            } finally {
+              ttsSemaphore.release();
+            }
+          })()
+        );
+
+        // 按全局顺序发送，保证音频与句子顺序一致
+        for (const r of results) {
+          if (r && r.buffer.length > 0) {
+            safeSend({ type: 'audio_chunk', content: r.buffer.toString('base64'), pause_ms: r.pauseMs });
+          }
+        }
+      })();
+
+      activePromises.push(promise);
+    }
   };
 
   const flushTts = () => {
@@ -276,7 +465,8 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
       const textToSpeak = ttsChunkIndex > 0 ? `……，${text}` : text;
       const pauseMs = getPauseMs(text);
       ttsChunkIndex += 1;
-      queueTts(textToSpeak, pauseMs);
+      pendingBatch.push({ text: textToSpeak, pauseMs, globalIndex: ttsChunkIndex });
+      dispatchBatch(); // 立即尝试调度
     }
   };
 
@@ -421,7 +611,8 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
   
   // Wait for all TTS tasks to finish before sending story_end
   if (isCancelled()) return;
-  await audioTaskChain;
+  // 等待所有已调度的并行 TTS 任务完成（Semaphore 保证并发 ≤ 3）
+  await Promise.all(activePromises);
 
   let parsedLogData = null;
   // Extract log data from fullResponse
@@ -437,6 +628,7 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
   }
   
   // Add assistant response to history
+  trimHistory();
   ws.history.push({ role: 'assistant', content: fullResponse });
   
   // 如果故事结束（不论是 LLM 主动判定还是其他方式），进行归档
@@ -447,11 +639,109 @@ async function handleStoryGeneration(ws, prompt, systemPrompt, voiceId, requestI
   safeSend({ type: 'story_end' });
 }
 
-wss.on('connection', (ws) => {
-  console.log('Client connected');
+// =============================================================================
+// SECURITY P0: WebSocket Token Validation
+// =============================================================================
+wss.on('connection', (ws, req) => {
+  // Extract token from query string (WebSocket doesn't support headers)
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const token = url.searchParams.get('token');
+  
+  // Validate JWT token from WebSocket handshake
+  if (!token) {
+    console.warn('[WS AUTH] Connection rejected: No token provided');
+    ws.close(4001, JSON.stringify({ error: 'MISSING_TOKEN', message: 'Token required' }));
+    return;
+  }
+  
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET, JWT_OPTIONS);
+    ws.user = decoded;
+    console.log(`[WS AUTH] Client connected, user authenticated`);
+  } catch (err) {
+    let errorCode = 'INVALID_TOKEN';
+    let errorMessage = 'Invalid token';
+    
+    if (err.name === 'TokenExpiredError') {
+      errorCode = 'TOKEN_EXPIRED';
+      errorMessage = 'Token has expired';
+    } else if (err.name === 'JsonWebTokenError') {
+      errorCode = 'INVALID_TOKEN';
+      errorMessage = 'Invalid token signature or malformed';
+    }
+    
+    console.warn(`[WS AUTH] Connection rejected: ${errorCode} - ${errorMessage}`);
+    ws.close(4001, JSON.stringify({ error: errorCode, message: errorMessage }));
+    return;
+  }
   
   // Store conversation history for this client
   ws.history = [];
+
+  // =============================================================================
+  // P1 STABILITY: WebSocket Heartbeat (Ping-Pong)
+  // =============================================================================
+  let pingInterval = null;
+  let pongReceived = false;
+  let pingTimer = null;
+  const HEARTBEAT_INTERVAL_MS = 30000;  // 30s ping interval
+  const PONG_TIMEOUT_MS = 60000;         // 60s to receive pong
+
+  function startHeartbeat() {
+    stopHeartbeat();
+    pongReceived = true; // Reset on new connection
+
+    pingInterval = setInterval(() => {
+      if (ws.readyState !== ws.OPEN) {
+        stopHeartbeat();
+        return;
+      }
+      pongReceived = false;
+      try {
+        ws.ping();
+        console.log('[HEARTBEAT] Ping sent');
+      } catch (e) {
+        console.warn('[HEARTBEAT] Ping failed:', e.message);
+        ws.close();
+        return;
+      }
+
+      // Wait for pong, close if timeout
+      pingTimer = setTimeout(() => {
+        if (!pongReceived && ws.readyState === ws.OPEN) {
+          console.warn('[HEARTBEAT] No pong received, closing connection');
+          ws.close(4002, JSON.stringify({ error: 'PONG_TIMEOUT', message: 'Heartbeat timeout' }));
+        }
+      }, PONG_TIMEOUT_MS);
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  function stopHeartbeat() {
+    if (pingInterval) {
+      clearInterval(pingInterval);
+      pingInterval = null;
+    }
+    if (pingTimer) {
+      clearTimeout(pingTimer);
+      pingTimer = null;
+    }
+  }
+
+  ws.on('pong', () => {
+    pongReceived = true;
+    console.log('[HEARTBEAT] Pong received');
+  });
+
+  startHeartbeat();
+
+  // P1 STABILITY: Trim history to max 40 entries (20 rounds)
+  const MAX_HISTORY = 40;
+  function trimHistory() {
+    if (ws.history.length > MAX_HISTORY) {
+      ws.history = ws.history.slice(-MAX_HISTORY);
+      console.log(`[HISTORY] Trimmed to ${MAX_HISTORY} entries`);
+    }
+  }
 
   const safeJsonSend = (payload) => {
     try {
@@ -536,6 +826,7 @@ wss.on('connection', (ws) => {
         
         // Get ending phrase from LLM
         const terminationPrompt = "用户长时间未回应或结束了对话。请根据当前故事体裁输出一句简短的晚安结束语（例如童话可以是'森林里的小动物们都睡了，晚安'），不要输出其他内容。";
+        trimHistory();
         ws.history.push({ role: 'user', content: terminationPrompt });
         
         let fullResponse = '';
@@ -544,6 +835,7 @@ wss.on('connection', (ws) => {
            fullResponse += chunk;
         }
         
+        trimHistory();
         ws.history.push({ role: 'assistant', content: fullResponse });
 
         // Generate final audio
@@ -584,6 +876,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    stopHeartbeat();
     console.log('Client disconnected');
   });
 });
@@ -643,6 +936,14 @@ async function saveConversationToMarkdown(history, logData) {
 
 app.get('/', (req, res) => {
   res.send('Sleep Story AI Server is running');
+});
+
+// Error handler for CORS rejection → return 403 instead of 500
+app.use((err, req, res, next) => {
+  if (err && err.corsError) {
+    return res.status(err.status || 403).json({ error: 'CORS_NOT_ALLOWED', message: 'Origin not in whitelist' });
+  }
+  next(err);
 });
 
 server.listen(port, () => {
