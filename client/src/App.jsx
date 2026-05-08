@@ -9,6 +9,7 @@ import StarryBackground from './components/common/StarryBackground';
 import { getDefaultPrompt } from './config/prompts';
 import { Mic, AlertCircle, Ear, Wifi, WifiOff } from 'lucide-react';
 import { motion } from 'framer-motion';
+import toast, { Toaster } from 'react-hot-toast';
 import './styles/App.css';
 
 function App() {
@@ -106,14 +107,27 @@ function App() {
     }
   }, []);
 
-  // 定时器到期：停止播放并显示提示
+  // 定时器到期：停止播放并显示提示（夜间模式友好 toast）
   const handleTimerStop = useCallback(() => {
     setTimerActive(false);
     cancelTTS();
     interruptPlayback();
-    // 温柔提示用户
-    alert('定时时间已到，祝你晚安好梦 🌙');
-  }, [cancelTTS, interruptPlayback]);
+    // 温柔提示用户 - toast 不阻断交互，夜间模式友好
+    toast.success('定时时间已到，祝你晚安好梦 🌙', {
+      duration: 5000,
+      position: 'top-center',
+      style: {
+        background: 'rgba(30, 41, 59, 0.95)',
+        color: '#e2e8f0',
+        border: '1px solid rgba(100, 116, 139, 0.2)',
+        borderRadius: '16px',
+        padding: '14px 20px',
+        fontSize: '15px',
+        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)',
+        backdropFilter: 'blur(12px)',
+      },
+    });
+  }, []);
 
   const handleWakeWord = useCallback(() => {
     console.log('Wake word triggered!');
@@ -270,7 +284,11 @@ function App() {
   }, [cancelTTS, startListening, stopListening, stopWakeWordListener]);
 
   return (
-    <div
+    <>
+      {/* Toast 通知容器 - 夜间模式友好 */}
+      <Toaster />
+      
+      <div
       className="min-h-[100dvh] text-slate-100 flex flex-col items-center justify-start sm:justify-center font-sans relative overflow-x-hidden overflow-y-auto custom-scrollbar"
       style={{
         paddingTop: 'calc(clamp(16px, 3vw, 24px) + env(safe-area-inset-top))',
@@ -541,6 +559,7 @@ function App() {
         </button>
       </div>
     </div>
+    </>
   );
 }
 
